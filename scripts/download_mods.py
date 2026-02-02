@@ -77,12 +77,84 @@ def download_file(url: str, dest: str) -> bool:
 
 
 def collect_project_ids(max_mods: int) -> list[dict]:
-    """Collect project IDs by searching across many queries."""
+    """Collect project IDs by searching across many queries and facet combos."""
     projects = {}
 
-    # Generic searches to find lots of mods
+    def _add_hits(hits):
+        for hit in hits:
+            pid = hit["project_id"]
+            if pid not in projects:
+                projects[pid] = {
+                    "project_id": pid,
+                    "slug": hit.get("slug", pid),
+                    "title": hit.get("title", ""),
+                    "downloads": hit.get("downloads", 0),
+                }
+
+    def _exhaust_search(query: str, facets: str, label: str):
+        """Paginate through all results for a query+facets combo (up to 10000)."""
+        offset = 0
+        while offset < 10000:
+            hits = search_mods(query, offset=offset, limit=100, facets=facets)
+            if not hits:
+                break
+            _add_hits(hits)
+            if len(hits) < 100:
+                break
+            offset += 100
+            time.sleep(0.25)
+        print(f"  [{label}]: {len(projects)} unique projects so far")
+
+    print(f"Searching Modrinth for mods (target: {max_mods})...")
+
+    # Strategy 1: Browse by sort order with no query (different sort = different results)
+    for sort_index in ["downloads", "updated", "newest", "follows", "relevance"]:
+        facets = '[["project_type:mod"]]'
+        offset = 0
+        while offset < 10000:
+            params = {
+                "offset": str(offset),
+                "limit": "100",
+                "index": sort_index,
+                "facets": facets,
+            }
+            data = api_get("/search", params)
+            if not data or "hits" not in data or not data["hits"]:
+                break
+            _add_hits(data["hits"])
+            if len(data["hits"]) < 100:
+                break
+            offset += 100
+            time.sleep(0.25)
+        print(f"  [sort={sort_index}]: {len(projects)} unique projects so far")
+
+    # Strategy 2: Browse by loader facets
+    loaders = ["forge", "fabric", "quilt", "neoforge", "rift", "liteloader"]
+    for loader in loaders:
+        if len(projects) >= max_mods:
+            break
+        facets = f'[["project_type:mod"],["categories:{loader}"]]'
+        _exhaust_search("", facets, f"loader={loader}")
+
+    # Strategy 3: Browse by Minecraft version facets
+    versions = [
+        "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21",
+        "1.20.6", "1.20.4", "1.20.2", "1.20.1", "1.20",
+        "1.19.4", "1.19.2", "1.19",
+        "1.18.2", "1.18.1", "1.18",
+        "1.17.1", "1.16.5", "1.16.4", "1.16.3",
+        "1.15.2", "1.14.4", "1.12.2", "1.12.1",
+        "1.11.2", "1.10.2", "1.9.4", "1.8.9", "1.7.10",
+    ]
+    for ver in versions:
+        if len(projects) >= max_mods:
+            break
+        facets = f'[["project_type:mod"],["versions:{ver}"]]'
+        _exhaust_search("", facets, f"version={ver}")
+
+    # Strategy 4: Keyword searches for remaining coverage
     search_terms = [
-        "", "sword", "armor", "tool", "food", "ore", "gem", "magic",
+        "sword", "armor", "tool", "food", "ore", "gem", "magic",
         "potion", "weapon", "ring", "staff", "bow", "shield", "helmet",
         "pickaxe", "axe", "wand", "crystal", "ingot", "dust", "rod",
         "amulet", "charm", "rune", "scroll", "book", "crop", "seed",
@@ -97,35 +169,39 @@ def collect_project_ids(max_mods: int) -> list[dict]:
         "nether", "end", "void", "sky", "ocean", "cave",
         "copper", "iron", "gold", "diamond", "emerald", "netherite",
         "ruby", "sapphire", "amethyst", "obsidian", "quartz",
+        "hammer", "spear", "dagger", "rapier", "scythe", "trident",
+        "arrow", "bolt", "bullet", "gun", "rifle", "cannon",
+        "spell", "ritual", "altar", "totem", "talisman",
+        "elixir", "brew", "flask", "vial", "bottle",
+        "cape", "cloak", "boots", "gloves", "leggings", "chestplate",
+        "pendant", "bracelet", "earring", "crown", "tiara",
+        "apple", "bread", "cake", "pie", "stew", "soup", "meat",
+        "wool", "leather", "silk", "cloth", "fabric", "string",
+        "brick", "stone", "wood", "log", "plank", "slab",
+        "rail", "minecart", "boat", "elytra", "saddle",
+        "compass", "map", "clock", "spyglass", "telescope",
+        "redstone", "piston", "hopper", "dispenser", "dropper",
+        "enchant", "anvil", "grindstone", "smithing",
+        "spawn", "egg", "bucket", "shears", "flint",
+        "pearl", "blaze", "ghast", "skeleton", "zombie", "creeper",
+        "witch", "villager", "pillager", "phantom", "enderman",
+        "slime", "honey", "wax", "dye", "ink", "paint",
+        "music", "disc", "note", "horn", "bell", "drum",
     ]
-
-    print(f"Searching Modrinth for mods (target: {max_mods})...")
-
     for term in search_terms:
         if len(projects) >= max_mods:
             break
+        facets = '[["project_type:mod"]]'
+        _exhaust_search(term, facets, f"query={term}")
 
-        offset = 0
-        while offset < 500 and len(projects) < max_mods:
-            hits = search_mods(term, offset=offset, limit=100)
-            if not hits:
-                break
+    # Strategy 5: Single letter searches for broad coverage
+    for letter in "abcdefghijklmnopqrstuvwxyz":
+        if len(projects) >= max_mods:
+            break
+        facets = '[["project_type:mod"]]'
+        _exhaust_search(letter, facets, f"letter={letter}")
 
-            for hit in hits:
-                pid = hit["project_id"]
-                if pid not in projects:
-                    projects[pid] = {
-                        "project_id": pid,
-                        "slug": hit.get("slug", pid),
-                        "title": hit.get("title", ""),
-                        "downloads": hit.get("downloads", 0),
-                    }
-
-            offset += 100
-            time.sleep(0.3)  # Be nice to the API
-
-        print(f"  '{term}': {len(projects)} unique projects so far")
-
+    print(f"\nTotal unique projects found: {len(projects)}")
     return list(projects.values())
 
 
