@@ -10,13 +10,13 @@ Usage:
 
 import argparse
 import os
+import sys
 import time
 import json
 import urllib.request
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_BASE = "https://api.modrinth.com/v2"
 HEADERS = {
@@ -40,12 +40,13 @@ def api_get(endpoint: str, params: dict = None) -> dict | list | None:
 def search_mods(query: str, offset: int = 0, limit: int = 100, facets: str = None) -> list:
     """Search Modrinth for mods."""
     params = {
-        "query": query,
-        "offset": offset,
-        "limit": limit,
+        "offset": str(offset),
+        "limit": str(limit),
         "index": "downloads",
         "facets": facets or '[["project_type:mod"]]',
     }
+    if query:
+        params["query"] = query
     data = api_get("/search", params)
     if data and "hits" in data:
         return data["hits"]
