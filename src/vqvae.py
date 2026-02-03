@@ -104,26 +104,27 @@ class VectorQuantizer(nn.Module):
         indices = distances.argmin(dim=1)  # (B*H*W,)
         z_q = self.embedding(indices).view(B, H, W, D).permute(0, 3, 1, 2)
 
-        # EMA update
+        # EMA update (no gradient needed)
         if self.training:
-            encodings = F.one_hot(indices, self.num_embeddings).float()
-            self.ema_cluster_size.mul_(self.ema_decay).add_(
-                encodings.sum(0), alpha=1 - self.ema_decay
-            )
-            embed_sum = z_flat.t() @ encodings  # (D, K)
-            self.ema_embed_sum.mul_(self.ema_decay).add_(
-                embed_sum.t(), alpha=1 - self.ema_decay
-            )
-            # Laplace smoothing
-            n = self.ema_cluster_size.sum()
-            cluster_size = (
-                (self.ema_cluster_size + 1e-5)
-                / (n + self.num_embeddings * 1e-5)
-                * n
-            )
-            self.embedding.weight.data.copy_(
-                self.ema_embed_sum / cluster_size.unsqueeze(1)
-            )
+            with torch.no_grad():
+                encodings = F.one_hot(indices, self.num_embeddings).float()
+                self.ema_cluster_size.mul_(self.ema_decay).add_(
+                    encodings.sum(0), alpha=1 - self.ema_decay
+                )
+                embed_sum = z_flat.detach().t() @ encodings  # (D, K)
+                self.ema_embed_sum.mul_(self.ema_decay).add_(
+                    embed_sum.t(), alpha=1 - self.ema_decay
+                )
+                # Laplace smoothing
+                n = self.ema_cluster_size.sum()
+                cluster_size = (
+                    (self.ema_cluster_size + 1e-5)
+                    / (n + self.num_embeddings * 1e-5)
+                    * n
+                )
+                self.embedding.weight.data.copy_(
+                    self.ema_embed_sum / cluster_size.unsqueeze(1)
+                )
 
         # Loss
         commitment_loss = F.mse_loss(z, z_q.detach())
