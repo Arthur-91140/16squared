@@ -58,20 +58,21 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
     jar_name = Path(jar_path).stem
 
     for entry in zf.namelist():
-        # Match assets/*/textures/item/*.png or assets/*/textures/items/*.png
-        parts = entry.lower().split("/")
-        if len(parts) < 5:
+        # Search for any folder named "item" or "items" anywhere in the path
+        entry_lower = entry.lower()
+        if not entry_lower.endswith(".png"):
             continue
-        if parts[0] != "assets":
-            continue
-        if parts[2] != "textures":
-            continue
-        if parts[3] not in ("item", "items"):
-            continue
-        if not entry.lower().endswith(".png"):
-            continue
-        # Skip subdirectories (armor layers, etc.)
-        if len(parts) > 5:
+
+        parts = entry_lower.split("/")
+
+        # Check if "item" or "items" is anywhere in the path
+        has_item_folder = False
+        for part in parts[:-1]:  # Exclude filename
+            if part in ("item", "items"):
+                has_item_folder = True
+                break
+
+        if not has_item_folder:
             continue
 
         try:
@@ -89,8 +90,7 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
             img = img.convert("RGBA")
 
             # Keep original filename, organized by mod
-            namespace = parts[1]
-            original_name = parts[-1]  # Original filename from JAR
+            original_name = Path(entry).name  # Original filename from JAR (preserve case)
 
             # Create mod subdirectory
             mod_dir = os.path.join(output_dir, jar_name)
@@ -113,7 +113,7 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
                 "filename": f"{jar_name}/{original_name}",
                 "label": label,
                 "source_jar": jar_name,
-                "namespace": namespace,
+                "original_path": entry,
             })
 
         except Exception:
