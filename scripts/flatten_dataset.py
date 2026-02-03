@@ -24,8 +24,8 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Track filename usage for conflict resolution
-    name_counts = defaultdict(int)
+    # Track seen filenames to skip duplicates
+    seen_names = set()
     metadata = []
 
     # Load existing metadata if present
@@ -42,27 +42,22 @@ def main():
     print(f"Found {len(all_pngs)} textures in {args.input_dir}")
 
     copied = 0
-    conflicts = 0
+    skipped = 0
 
     for png_path in all_pngs:
         mod_name = png_path.parent.name
         original_name = png_path.name
         base_name = png_path.stem
-        ext = png_path.suffix
 
-        # Determine output filename
-        if name_counts[original_name] == 0:
-            # First occurrence, use original name
-            out_name = original_name
-        else:
-            # Conflict, add numeric suffix
-            out_name = f"{base_name}_{name_counts[original_name]}{ext}"
-            conflicts += 1
+        # Skip duplicates
+        if original_name in seen_names:
+            skipped += 1
+            continue
 
-        name_counts[original_name] += 1
+        seen_names.add(original_name)
 
         # Copy file
-        out_path = os.path.join(args.output_dir, out_name)
+        out_path = os.path.join(args.output_dir, original_name)
         shutil.copy2(png_path, out_path)
         copied += 1
 
@@ -70,14 +65,13 @@ def main():
         rel_key = f"{mod_name}/{original_name}"
         if rel_key in input_meta:
             entry = input_meta[rel_key].copy()
-            entry["filename"] = out_name
+            entry["filename"] = original_name
         else:
             label = base_name.replace("_", " ").replace("-", " ").lower()
             entry = {
-                "filename": out_name,
+                "filename": original_name,
                 "label": label,
                 "source_jar": mod_name,
-                "original_name": original_name,
             }
 
         metadata.append(entry)
@@ -89,7 +83,7 @@ def main():
 
     print(f"\nDone!")
     print(f"  Textures copied: {copied}")
-    print(f"  Naming conflicts resolved: {conflicts}")
+    print(f"  Duplicates skipped: {skipped}")
     print(f"  Output directory: {args.output_dir}")
     print(f"  Metadata saved to: {meta_path}")
 
