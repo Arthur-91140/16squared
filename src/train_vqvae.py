@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import gc
 import os
 
 import torch
@@ -29,29 +30,30 @@ def save_checkpoint(model, optimizer, epoch, loss, path):
     }, path)
 
 
-def save_samples(model, dataloader, device, epoch, output_dir):
+def save_samples(model, batch_images, device, epoch, output_dir):
     """Save a grid of original vs reconstructed textures."""
     from torchvision.utils import save_image
 
     model.eval()
-    batch = next(iter(dataloader))
-    images = batch["image"][:8].to(device)
+    images = batch_images[:8].to(device)
 
     with torch.no_grad():
         recon, _, _, _ = model(images)
-
         # Denormalize from [-1,1] to [0,1]
-        images = (images + 1) / 2
-        recon = (recon + 1) / 2
-
-        comparison = torch.cat([images, recon], dim=0)
+        images_save = (images + 1) / 2
+        recon_save = (recon + 1) / 2
+        comparison = torch.cat([images_save, recon_save], dim=0)
         save_image(comparison, os.path.join(output_dir, f"vqvae_epoch_{epoch:04d}.png"), nrow=8)
 
-        # Cleanup
-        del images, recon, comparison
-
-    torch.cuda.empty_cache()
     model.train()
+
+
+def clear_memory():
+    """Aggressively clear GPU and CPU memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def main():
@@ -69,6 +71,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers (0 for Windows)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--sample_every", type=int, default=5, help="Save sample images every N epochs")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -106,6 +109,9 @@ def main():
     # Logging
     writer = SummaryWriter(os.path.join(args.output_dir, "logs_vqvae"))
 
+    # Keep one batch for samples (avoid reloading)
+    sample_batch = None
+
     # Training loop
     for epoch in range(start_epoch, args.epochs):
         model.train()
@@ -115,12 +121,16 @@ def main():
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for batch in pbar:
-            images = batch["image"].to(device)
+            images = batch["image"].to(device, non_blocking=True)
+
+            # Save first batch for samples
+            if sample_batch is None:
+                sample_batch = batch["image"].clone()
 
             recon, recon_loss, commit_loss, _ = model(images)
             loss = recon_loss + commit_loss
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # More memory efficient
             loss.backward()
             optimizer.step()
 
@@ -128,7 +138,10 @@ def main():
             total_commit += commit_loss.item()
             n_batches += 1
 
-            pbar.set_postfix(recon=f"{recon_loss.item():.4f}", commit=f"{commit_loss.item():.4f}")
+            # Clear intermediate tensors
+            del images, recon, loss, recon_loss, commit_loss
+
+            pbar.set_postfix(recon=f"{total_recon/n_batches:.4f}", commit=f"{total_commit/n_batches:.4f}")
 
         avg_recon = total_recon / n_batches
         avg_commit = total_commit / n_batches
@@ -136,11 +149,13 @@ def main():
         writer.add_scalar("loss/commit", avg_commit, epoch)
         print(f"Epoch {epoch+1}: recon={avg_recon:.4f}, commit={avg_commit:.4f}")
 
-        # Clear VRAM before saving samples
-        torch.cuda.empty_cache()
+        # Clear memory between epochs
+        clear_memory()
 
-        # Save samples
-        save_samples(model, dataloader, device, epoch, args.output_dir)
+        # Save samples (less frequently)
+        if (epoch + 1) % args.sample_every == 0:
+            save_samples(model, sample_batch, device, epoch, args.output_dir)
+            clear_memory()
 
         # Checkpoint
         if (epoch + 1) % args.save_every == 0 or epoch == args.epochs - 1:
