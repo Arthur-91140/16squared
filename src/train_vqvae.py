@@ -14,6 +14,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -109,6 +110,9 @@ def main():
     # Logging
     writer = SummaryWriter(os.path.join(args.output_dir, "logs_vqvae"))
 
+    # Mixed precision
+    scaler = GradScaler("cuda")
+
     # Keep one batch for samples (avoid reloading)
     sample_batch = None
 
@@ -127,12 +131,15 @@ def main():
             if sample_batch is None:
                 sample_batch = batch["image"].clone()
 
-            recon, recon_loss, commit_loss, _ = model(images)
-            loss = recon_loss + commit_loss
+            # FP16 forward pass
+            with autocast("cuda"):
+                recon, recon_loss, commit_loss, _ = model(images)
+                loss = recon_loss + commit_loss
 
-            optimizer.zero_grad(set_to_none=True)  # More memory efficient
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_recon += recon_loss.item()
             total_commit += commit_loss.item()
