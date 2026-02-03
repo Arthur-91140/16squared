@@ -88,16 +88,15 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
 
             img = img.convert("RGBA")
 
-            # Generate unique filename, organized by mod
+            # Keep original filename, organized by mod
             namespace = parts[1]
-            tex_name = Path(parts[-1]).stem
+            original_name = parts[-1]  # Original filename from JAR
 
             # Create mod subdirectory
             mod_dir = os.path.join(output_dir, jar_name)
             os.makedirs(mod_dir, exist_ok=True)
 
-            safe_name = f"{namespace}__{tex_name}.png"
-            out_path = os.path.join(mod_dir, safe_name)
+            out_path = os.path.join(mod_dir, original_name)
 
             # Skip if already exists
             if os.path.exists(out_path):
@@ -108,9 +107,10 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
             extracted += 1
 
             # Build label from filename
+            tex_name = Path(original_name).stem
             label = tex_name.replace("_", " ").replace("-", " ").lower()
             local_meta.append({
-                "filename": f"{jar_name}/{safe_name}",
+                "filename": f"{jar_name}/{original_name}",
                 "label": label,
                 "source_jar": jar_name,
                 "namespace": namespace,
