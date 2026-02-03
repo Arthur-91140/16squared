@@ -40,12 +40,17 @@ def save_samples(model, dataloader, device, epoch, output_dir):
     with torch.no_grad():
         recon, _, _, _ = model(images)
 
-    # Denormalize from [-1,1] to [0,1]
-    images = (images + 1) / 2
-    recon = (recon + 1) / 2
+        # Denormalize from [-1,1] to [0,1]
+        images = (images + 1) / 2
+        recon = (recon + 1) / 2
 
-    comparison = torch.cat([images, recon], dim=0)
-    save_image(comparison, os.path.join(output_dir, f"vqvae_epoch_{epoch:04d}.png"), nrow=8)
+        comparison = torch.cat([images, recon], dim=0)
+        save_image(comparison, os.path.join(output_dir, f"vqvae_epoch_{epoch:04d}.png"), nrow=8)
+
+        # Cleanup
+        del images, recon, comparison
+
+    torch.cuda.empty_cache()
     model.train()
 
 
@@ -130,6 +135,9 @@ def main():
         writer.add_scalar("loss/recon", avg_recon, epoch)
         writer.add_scalar("loss/commit", avg_commit, epoch)
         print(f"Epoch {epoch+1}: recon={avg_recon:.4f}, commit={avg_commit:.4f}")
+
+        # Clear VRAM before saving samples
+        torch.cuda.empty_cache()
 
         # Save samples
         save_samples(model, dataloader, device, epoch, args.output_dir)
