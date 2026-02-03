@@ -50,11 +50,10 @@ def save_samples(model, batch_images, device, epoch, output_dir):
 
 
 def clear_memory():
-    """Aggressively clear GPU and CPU memory."""
+    """Clear GPU and CPU memory."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.synchronize()
 
 
 def main():
@@ -123,8 +122,8 @@ def main():
         total_commit = 0
         n_batches = 0
 
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
-        for batch in pbar:
+        pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}/{args.epochs}")
+        for batch_idx, batch in pbar:
             images = batch["image"].to(device, non_blocking=True)
 
             # Save first batch for samples
@@ -149,6 +148,10 @@ def main():
             del images, recon, loss, recon_loss, commit_loss
 
             pbar.set_postfix(recon=f"{total_recon/n_batches:.4f}", commit=f"{total_commit/n_batches:.4f}")
+
+            # Periodic cleanup within epoch
+            if batch_idx % 500 == 0 and batch_idx > 0:
+                clear_memory()
 
         avg_recon = total_recon / n_batches
         avg_commit = total_commit / n_batches
