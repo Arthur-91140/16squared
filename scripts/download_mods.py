@@ -2,10 +2,10 @@
 Download Minecraft mod JARs from Modrinth API for texture extraction.
 
 Searches for mods across multiple categories and downloads their JARs.
-Targets mods with item textures (16x16).
+Downloads run in parallel with search for maximum speed.
 
 Usage:
-    python scripts/download_mods.py --output_dir dataset/mods --max_mods 5000
+    python scripts/download_mods.py --output_dir dataset/mods --max_mods 15000 --workers 8
 """
 
 import argparse
@@ -13,15 +13,22 @@ import os
 import sys
 import time
 import json
+import queue
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_BASE = "https://api.modrinth.com/v2"
 HEADERS = {
     "User-Agent": "16squared-texture-generator/1.0 (github.com/Arthur-91140/16squared)",
 }
+
+# Thread-safe counters
+download_lock = threading.Lock()
+stats = {"downloaded": 0, "skipped": 0, "failed": 0, "queued": 0}
 
 
 def api_get(endpoint: str, params: dict = None) -> dict | list | None:
@@ -32,17 +39,16 @@ def api_get(endpoint: str, params: dict = None) -> dict | list | None:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, Exception) as e:
-        print(f"  API error: {e}")
+    except Exception:
         return None
 
 
-def search_mods(query: str, offset: int = 0, limit: int = 100, facets: str = None) -> list:
+def search_mods(query: str, offset: int = 0, limit: int = 100, facets: str = None, index: str = "downloads") -> list:
     """Search Modrinth for mods."""
     params = {
         "offset": str(offset),
         "limit": str(limit),
-        "index": "downloads",
+        "index": index,
         "facets": facets or '[["project_type:mod"]]',
     }
     if query:
@@ -63,26 +69,81 @@ def download_file(url: str, dest: str) -> bool:
     """Download a file."""
     if os.path.exists(dest):
         return True
+    tmp_dest = dest + ".tmp"
     try:
         req = urllib.request.Request(url, headers=HEADERS)
         with urllib.request.urlopen(req, timeout=60) as resp:
-            with open(dest, "wb") as f:
+            with open(tmp_dest, "wb") as f:
                 f.write(resp.read())
+        os.rename(tmp_dest, dest)
         return True
-    except Exception as e:
-        print(f"  Download failed: {e}")
-        if os.path.exists(dest):
-            os.remove(dest)
+    except Exception:
+        if os.path.exists(tmp_dest):
+            os.remove(tmp_dest)
         return False
 
 
-def collect_project_ids(max_mods: int) -> list[dict]:
-    """Collect project IDs by searching across many queries and facet combos."""
-    projects = {}
+def download_worker(project: dict, output_dir: str, idx: int, total: int) -> bool:
+    """Download a single mod JAR. Called from thread pool."""
+    slug = project["slug"]
 
-    def _add_hits(hits):
-        for hit in hits:
-            pid = hit["project_id"]
+    versions = get_project_versions(project["project_id"])
+    if not versions:
+        with download_lock:
+            stats["failed"] += 1
+            print(f"[{idx}/{total}] {slug}... SKIP (no versions)")
+        return False
+
+    # Try release versions first
+    for version in versions:
+        if version.get("version_type") != "release":
+            continue
+        for f in version.get("files", []):
+            if f["filename"].endswith(".jar"):
+                dest = os.path.join(output_dir, f["filename"])
+                if os.path.exists(dest):
+                    with download_lock:
+                        stats["skipped"] += 1
+                        print(f"[{idx}/{total}] {slug}... EXISTS")
+                    return True
+                if download_file(f["url"], dest):
+                    with download_lock:
+                        stats["downloaded"] += 1
+                        print(f"[{idx}/{total}] {slug}... OK")
+                    return True
+
+    # Fallback: any version
+    for version in versions[:3]:
+        for f in version.get("files", []):
+            if f["filename"].endswith(".jar"):
+                dest = os.path.join(output_dir, f["filename"])
+                if os.path.exists(dest):
+                    with download_lock:
+                        stats["skipped"] += 1
+                        print(f"[{idx}/{total}] {slug}... EXISTS")
+                    return True
+                if download_file(f["url"], dest):
+                    with download_lock:
+                        stats["downloaded"] += 1
+                        print(f"[{idx}/{total}] {slug}... OK")
+                    return True
+
+    with download_lock:
+        stats["failed"] += 1
+        print(f"[{idx}/{total}] {slug}... SKIP (no JAR)")
+    return False
+
+
+def search_and_download(output_dir: str, max_mods: int, workers: int):
+    """Search for mods and download in parallel."""
+    projects = {}
+    projects_lock = threading.Lock()
+    download_queue = queue.Queue()
+    search_done = threading.Event()
+
+    def _add_project(hit):
+        pid = hit["project_id"]
+        with projects_lock:
             if pid not in projects:
                 projects[pid] = {
                     "project_id": pid,
@@ -90,190 +151,134 @@ def collect_project_ids(max_mods: int) -> list[dict]:
                     "title": hit.get("title", ""),
                     "downloads": hit.get("downloads", 0),
                 }
+                download_queue.put(projects[pid])
+                return True
+        return False
 
-    def _exhaust_search(query: str, facets: str, label: str):
-        """Paginate through all results for a query+facets combo (up to 10000)."""
+    def _exhaust_search(query: str, facets: str, index: str = "downloads"):
+        """Paginate through all results for a query+facets combo."""
         offset = 0
         while offset < 10000:
-            hits = search_mods(query, offset=offset, limit=100, facets=facets)
+            with projects_lock:
+                if len(projects) >= max_mods:
+                    return
+            hits = search_mods(query, offset=offset, limit=100, facets=facets, index=index)
             if not hits:
                 break
-            _add_hits(hits)
+            for hit in hits:
+                _add_project(hit)
             if len(hits) < 100:
                 break
             offset += 100
-            time.sleep(0.25)
-        print(f"  [{label}]: {len(projects)} unique projects so far")
+            time.sleep(0.1)
 
-    print(f"Searching Modrinth for mods (target: {max_mods})...")
+    def search_thread():
+        """Thread that performs all searches."""
+        print(f"Searching Modrinth for mods (target: {max_mods})...")
 
-    # Strategy 1: Browse by sort order with no query (different sort = different results)
-    for sort_index in ["downloads", "updated", "newest", "follows", "relevance"]:
-        facets = '[["project_type:mod"]]'
-        offset = 0
-        while offset < 10000:
-            params = {
-                "offset": str(offset),
-                "limit": "100",
-                "index": sort_index,
-                "facets": facets,
-            }
-            data = api_get("/search", params)
-            if not data or "hits" not in data or not data["hits"]:
-                break
-            _add_hits(data["hits"])
-            if len(data["hits"]) < 100:
-                break
-            offset += 100
-            time.sleep(0.25)
-        print(f"  [sort={sort_index}]: {len(projects)} unique projects so far")
+        # Strategy 1: Different sort orders
+        for sort_index in ["downloads", "updated", "newest", "follows"]:
+            with projects_lock:
+                if len(projects) >= max_mods:
+                    break
+            _exhaust_search("", '[["project_type:mod"]]', index=sort_index)
+            with projects_lock:
+                print(f"  [sort={sort_index}]: {len(projects)} unique projects")
 
-    # Strategy 2: Browse by loader facets
-    loaders = ["forge", "fabric", "quilt", "neoforge", "rift", "liteloader"]
-    for loader in loaders:
-        if len(projects) >= max_mods:
-            break
-        facets = f'[["project_type:mod"],["categories:{loader}"]]'
-        _exhaust_search("", facets, f"loader={loader}")
+        # Strategy 2: Loaders
+        loaders = ["forge", "fabric", "quilt", "neoforge"]
+        for loader in loaders:
+            with projects_lock:
+                if len(projects) >= max_mods:
+                    break
+            _exhaust_search("", f'[["project_type:mod"],["categories:{loader}"]]')
+            with projects_lock:
+                print(f"  [loader={loader}]: {len(projects)} unique projects")
 
-    # Strategy 3: Browse by Minecraft version facets
-    versions = [
-        "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21",
-        "1.20.6", "1.20.4", "1.20.2", "1.20.1", "1.20",
-        "1.19.4", "1.19.2", "1.19",
-        "1.18.2", "1.18.1", "1.18",
-        "1.17.1", "1.16.5", "1.16.4", "1.16.3",
-        "1.15.2", "1.14.4", "1.12.2", "1.12.1",
-        "1.11.2", "1.10.2", "1.9.4", "1.8.9", "1.7.10",
-    ]
-    for ver in versions:
-        if len(projects) >= max_mods:
-            break
-        facets = f'[["project_type:mod"],["versions:{ver}"]]'
-        _exhaust_search("", facets, f"version={ver}")
+        # Strategy 3: Minecraft versions
+        versions = [
+            "1.21.4", "1.21.1", "1.20.4", "1.20.1", "1.19.2", "1.18.2",
+            "1.17.1", "1.16.5", "1.15.2", "1.14.4", "1.12.2", "1.10.2",
+            "1.8.9", "1.7.10",
+        ]
+        for ver in versions:
+            with projects_lock:
+                if len(projects) >= max_mods:
+                    break
+            _exhaust_search("", f'[["project_type:mod"],["versions:{ver}"]]')
+            with projects_lock:
+                print(f"  [version={ver}]: {len(projects)} unique projects")
 
-    # Strategy 4: Keyword searches for remaining coverage
-    search_terms = [
-        "sword", "armor", "tool", "food", "ore", "gem", "magic",
-        "potion", "weapon", "ring", "staff", "bow", "shield", "helmet",
-        "pickaxe", "axe", "wand", "crystal", "ingot", "dust", "rod",
-        "amulet", "charm", "rune", "scroll", "book", "crop", "seed",
-        "berry", "fruit", "fish", "mob", "dragon", "golem", "boss",
-        "tech", "machine", "pipe", "wire", "gear", "motor", "energy",
-        "furnace", "chest", "bag", "backpack", "key", "coin", "medal",
-        "biome", "dimension", "block", "decoration", "furniture",
-        "light", "lamp", "torch", "lantern", "candle",
-        "storage", "inventory", "crafting", "smelting",
-        "adventure", "exploration", "dungeon", "loot",
-        "nature", "animal", "plant", "flower", "tree",
-        "nether", "end", "void", "sky", "ocean", "cave",
-        "copper", "iron", "gold", "diamond", "emerald", "netherite",
-        "ruby", "sapphire", "amethyst", "obsidian", "quartz",
-        "hammer", "spear", "dagger", "rapier", "scythe", "trident",
-        "arrow", "bolt", "bullet", "gun", "rifle", "cannon",
-        "spell", "ritual", "altar", "totem", "talisman",
-        "elixir", "brew", "flask", "vial", "bottle",
-        "cape", "cloak", "boots", "gloves", "leggings", "chestplate",
-        "pendant", "bracelet", "earring", "crown", "tiara",
-        "apple", "bread", "cake", "pie", "stew", "soup", "meat",
-        "wool", "leather", "silk", "cloth", "fabric", "string",
-        "brick", "stone", "wood", "log", "plank", "slab",
-        "rail", "minecart", "boat", "elytra", "saddle",
-        "compass", "map", "clock", "spyglass", "telescope",
-        "redstone", "piston", "hopper", "dispenser", "dropper",
-        "enchant", "anvil", "grindstone", "smithing",
-        "spawn", "egg", "bucket", "shears", "flint",
-        "pearl", "blaze", "ghast", "skeleton", "zombie", "creeper",
-        "witch", "villager", "pillager", "phantom", "enderman",
-        "slime", "honey", "wax", "dye", "ink", "paint",
-        "music", "disc", "note", "horn", "bell", "drum",
-    ]
-    for term in search_terms:
-        if len(projects) >= max_mods:
-            break
-        facets = '[["project_type:mod"]]'
-        _exhaust_search(term, facets, f"query={term}")
+        # Strategy 4: Letter searches
+        for letter in "abcdefghijklmnopqrstuvwxyz0123456789":
+            with projects_lock:
+                if len(projects) >= max_mods:
+                    break
+            _exhaust_search(letter, '[["project_type:mod"]]')
 
-    # Strategy 5: Single letter searches for broad coverage
-    for letter in "abcdefghijklmnopqrstuvwxyz":
-        if len(projects) >= max_mods:
-            break
-        facets = '[["project_type:mod"]]'
-        _exhaust_search(letter, facets, f"letter={letter}")
+        with projects_lock:
+            print(f"\nSearch complete: {len(projects)} unique projects found")
+        search_done.set()
 
-    print(f"\nTotal unique projects found: {len(projects)}")
-    return list(projects.values())
+    def download_thread(executor, output_dir):
+        """Thread that submits download tasks from queue."""
+        futures = []
+        idx = 0
 
+        while True:
+            try:
+                project = download_queue.get(timeout=1.0)
+                idx += 1
+                with projects_lock:
+                    total = len(projects)
+                future = executor.submit(download_worker, project, output_dir, idx, total)
+                futures.append(future)
+            except queue.Empty:
+                if search_done.is_set() and download_queue.empty():
+                    break
 
-def download_mod_jar(project: dict, output_dir: str) -> bool:
-    """Download the latest JAR for a project."""
-    versions = get_project_versions(project["project_id"])
-    if not versions:
-        return False
+        # Wait for remaining downloads
+        for future in as_completed(futures):
+            pass
 
-    # Pick the latest release version, prefer Forge/Fabric for more item mods
-    for version in versions:
-        if version.get("version_type") != "release":
-            continue
-        files = version.get("files", [])
-        for f in files:
-            if f["filename"].endswith(".jar"):
-                dest = os.path.join(output_dir, f["filename"])
-                if os.path.exists(dest):
-                    return True
-                return download_file(f["url"], dest)
+    # Start search thread
+    searcher = threading.Thread(target=search_thread, daemon=True)
+    searcher.start()
 
-    # Fallback: any version with a JAR
-    for version in versions[:3]:
-        files = version.get("files", [])
-        for f in files:
-            if f["filename"].endswith(".jar"):
-                dest = os.path.join(output_dir, f["filename"])
-                if os.path.exists(dest):
-                    return True
-                return download_file(f["url"], dest)
+    # Start download pool
+    print(f"Starting {workers} download workers...\n")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        downloader = threading.Thread(target=download_thread, args=(executor, output_dir), daemon=True)
+        downloader.start()
 
-    return False
+        # Wait for both to complete
+        searcher.join()
+        downloader.join()
+
+    return projects
 
 
 def main():
     parser = argparse.ArgumentParser(description="Download Minecraft mods from Modrinth")
     parser.add_argument("--output_dir", default="dataset/mods")
-    parser.add_argument("--max_mods", type=int, default=5000)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--max_mods", type=int, default=15000)
+    parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Phase 1: Collect project IDs
-    projects = collect_project_ids(args.max_mods)
-    print(f"\nFound {len(projects)} unique projects. Starting downloads...\n")
+    projects = search_and_download(args.output_dir, args.max_mods, args.workers)
 
-    # Save project list for reference
+    # Save manifest
     manifest_path = os.path.join(args.output_dir, "manifest.json")
     with open(manifest_path, "w") as f:
-        json.dump(projects, f, indent=2)
+        json.dump(list(projects.values()), f, indent=2)
 
-    # Phase 2: Download JARs
-    downloaded = 0
-    failed = 0
-
-    for i, project in enumerate(projects):
-        slug = project["slug"]
-        print(f"[{i+1}/{len(projects)}] {slug}...", end=" ", flush=True)
-
-        success = download_mod_jar(project, args.output_dir)
-        if success:
-            downloaded += 1
-            print("OK")
-        else:
-            failed += 1
-            print("SKIP")
-
-        time.sleep(0.3)
-
-    print(f"\nDone. Downloaded: {downloaded}, Failed/Skipped: {failed}")
-    print(f"JARs saved to: {args.output_dir}")
+    print(f"\nDone!")
+    print(f"  Downloaded: {stats['downloaded']}")
+    print(f"  Already existed: {stats['skipped']}")
+    print(f"  Failed/Skipped: {stats['failed']}")
+    print(f"  JARs saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":
