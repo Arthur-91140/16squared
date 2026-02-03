@@ -83,9 +83,10 @@ def download_file(url: str, dest: str) -> bool:
         return False
 
 
-def download_worker(project: dict, output_dir: str, idx: int, total: int) -> bool:
+def download_worker(project: dict, output_dir: str, idx: int, get_total) -> bool:
     """Download a single mod JAR. Called from thread pool."""
     slug = project["slug"]
+    total = get_total()  # Get current total dynamically
 
     versions = get_project_versions(project["project_id"])
     if not versions:
@@ -220,6 +221,11 @@ def search_and_download(output_dir: str, max_mods: int, workers: int):
             print(f"\nSearch complete: {len(projects)} unique projects found")
         search_done.set()
 
+    def get_total():
+        """Get current total project count."""
+        with projects_lock:
+            return len(projects)
+
     def download_thread(executor, output_dir):
         """Thread that submits download tasks from queue."""
         futures = []
@@ -229,9 +235,7 @@ def search_and_download(output_dir: str, max_mods: int, workers: int):
             try:
                 project = download_queue.get(timeout=1.0)
                 idx += 1
-                with projects_lock:
-                    total = len(projects)
-                future = executor.submit(download_worker, project, output_dir, idx, total)
+                future = executor.submit(download_worker, project, output_dir, idx, get_total)
                 futures.append(future)
             except queue.Empty:
                 if search_done.is_set() and download_queue.empty():
