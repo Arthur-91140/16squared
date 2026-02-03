@@ -88,11 +88,16 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
 
             img = img.convert("RGBA")
 
-            # Generate unique filename
+            # Generate unique filename, organized by mod
             namespace = parts[1]
             tex_name = Path(parts[-1]).stem
-            safe_name = f"{jar_name}__{namespace}__{tex_name}.png"
-            out_path = os.path.join(output_dir, safe_name)
+
+            # Create mod subdirectory
+            mod_dir = os.path.join(output_dir, jar_name)
+            os.makedirs(mod_dir, exist_ok=True)
+
+            safe_name = f"{namespace}__{tex_name}.png"
+            out_path = os.path.join(mod_dir, safe_name)
 
             # Skip if already exists
             if os.path.exists(out_path):
@@ -105,7 +110,7 @@ def extract_from_jar(jar_path: str, output_dir: str) -> tuple[int, int]:
             # Build label from filename
             label = tex_name.replace("_", " ").replace("-", " ").lower()
             local_meta.append({
-                "filename": safe_name,
+                "filename": f"{jar_name}/{safe_name}",
                 "label": label,
                 "source_jar": jar_name,
                 "namespace": namespace,
@@ -153,7 +158,7 @@ def process_jar(jar_path: str, output_dir: str, delete_after: bool, idx: int, to
 def main():
     parser = argparse.ArgumentParser(description="Extract 16x16 textures from mod JARs")
     parser.add_argument("--mods_dir", default="dataset/mods", help="Directory containing JAR files")
-    parser.add_argument("--output_dir", default="data/raw", help="Output directory for textures")
+    parser.add_argument("--output_dir", default="dataset/mod-filtered-png", help="Output directory for textures")
     parser.add_argument("--workers", type=int, default=8, help="Number of parallel workers")
     parser.add_argument("--keep_jars", action="store_true", help="Don't delete JARs after extraction")
     args = parser.parse_args()
