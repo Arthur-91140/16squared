@@ -33,13 +33,14 @@ def save_checkpoint(model, optimizer, epoch, loss, path):
 def generate_samples(transformer, vqvae, dataset, device, epoch, output_dir, n=8):
     """Generate sample textures and save them."""
     from torchvision.utils import save_image
+    import random
 
     transformer.eval()
     vqvae.eval()
 
-    prompts = ["iron sword", "diamond gem", "golden apple", "wooden shield",
-               "magic wand", "red potion", "silver ring", "fire staff"]
-    prompts = prompts[:n]
+    # Use random labels from the actual dataset vocab
+    all_labels = [entry["label"] for entry in dataset.metadata]
+    prompts = random.sample(all_labels, min(n, len(all_labels)))
 
     tokens = torch.stack([dataset.encode_label(p) for p in prompts]).to(device)
 
@@ -50,6 +51,12 @@ def generate_samples(transformer, vqvae, dataset, device, epoch, output_dir, n=8
 
     images = (images + 1) / 2  # [-1,1] -> [0,1]
     save_image(images, os.path.join(output_dir, f"gen_epoch_{epoch:04d}.png"), nrow=4)
+
+    # Log prompts used
+    with open(os.path.join(output_dir, f"gen_epoch_{epoch:04d}_prompts.txt"), "w") as f:
+        for p in prompts:
+            f.write(p + "\n")
+
     transformer.train()
 
 
@@ -66,7 +73,7 @@ def main():
     parser.add_argument("--num_layers", type=int, default=6)
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--codebook_size", type=int, default=512)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers (0 for Windows)")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=20)
     args = parser.parse_args()
@@ -82,6 +89,13 @@ def main():
         args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers
     )
     print(f"Dataset: {len(dataset)} textures, vocab: {dataset.vocab_size} words")
+
+    # Save vocab for inference
+    import json
+    vocab_path = os.path.join(args.checkpoint_dir, "vocab.json")
+    with open(vocab_path, "w") as f:
+        json.dump(dataset.word2idx, f, indent=2)
+    print(f"Vocab saved to {vocab_path}")
 
     # Load frozen VQ-VAE
     vqvae = VQVAE(

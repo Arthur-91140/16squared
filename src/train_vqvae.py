@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--embed_dim", type=int, default=256)
     parser.add_argument("--codebook_size", type=int, default=512)
     parser.add_argument("--commitment_cost", type=float, default=0.25)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers (0 for Windows)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--save_every", type=int, default=10)
     args = parser.parse_args()

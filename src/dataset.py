@@ -65,7 +65,15 @@ class MinecraftItemDataset(Dataset):
     def __getitem__(self, idx):
         entry = self.metadata[idx]
         img_path = os.path.join(self.data_dir, entry["filename"])
-        img = Image.open(img_path).convert("RGBA")
+
+        try:
+            img = Image.open(img_path).convert("RGBA")
+            # Ensure 16x16
+            if img.size != (16, 16):
+                img = img.resize((16, 16), Image.NEAREST)
+        except Exception:
+            # Return blank image on error
+            img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
 
         # Normalize to [-1, 1]
         pixels = np.array(img, dtype=np.float32) / 127.5 - 1.0  # (16, 16, 4)
