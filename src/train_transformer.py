@@ -9,10 +9,13 @@ Usage:
 """
 
 import argparse
+import gc
+import json
 import os
 
 import torch
 import torch.nn.functional as F
+from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -28,6 +31,13 @@ def save_checkpoint(model, optimizer, epoch, loss, path):
         "optimizer_state_dict": optimizer.state_dict(),
         "loss": loss,
     }, path)
+
+
+def clear_memory():
+    """Clear GPU and CPU memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def generate_samples(transformer, vqvae, dataset, device, epoch, output_dir, n=8):
@@ -49,8 +59,8 @@ def generate_samples(transformer, vqvae, dataset, device, epoch, output_dir, n=8
         indices_grid = indices.view(-1, 4, 4)
         images = vqvae.decode(indices_grid)
 
-    images = (images + 1) / 2  # [-1,1] -> [0,1]
-    save_image(images, os.path.join(output_dir, f"gen_epoch_{epoch:04d}.png"), nrow=4)
+        images = (images + 1) / 2  # [-1,1] -> [0,1]
+        save_image(images, os.path.join(output_dir, f"gen_epoch_{epoch:04d}.png"), nrow=4)
 
     # Log prompts used
     with open(os.path.join(output_dir, f"gen_epoch_{epoch:04d}_prompts.txt"), "w") as f:
@@ -76,6 +86,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers (0 for Windows)")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=20)
+    parser.add_argument("--sample_every", type=int, default=5, help="Save sample images every N epochs")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -91,7 +102,6 @@ def main():
     print(f"Dataset: {len(dataset)} textures, vocab: {dataset.vocab_size} words")
 
     # Save vocab for inference
-    import json
     vocab_path = os.path.join(args.checkpoint_dir, "vocab.json")
     with open(vocab_path, "w") as f:
         json.dump(dataset.word2idx, f, indent=2)
@@ -123,6 +133,7 @@ def main():
 
     optimizer = torch.optim.AdamW(transformer.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = GradScaler("cuda")
     start_epoch = 0
 
     if args.resume and os.path.exists(args.resume):
@@ -141,29 +152,36 @@ def main():
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for batch in pbar:
-            images = batch["image"].to(device)
-            text_tokens = batch["tokens"].to(device)
+            images = batch["image"].to(device, non_blocking=True)
+            text_tokens = batch["tokens"].to(device, non_blocking=True)
 
             # Encode images to VQ indices
             with torch.no_grad():
                 indices = vqvae.encode(images)  # (B, 4, 4)
             indices_flat = indices.view(indices.shape[0], -1)  # (B, 16)
 
-            # Transformer forward
-            logits = transformer(indices_flat, text_tokens)  # (B, 16, codebook_size)
-            loss = F.cross_entropy(
-                logits.reshape(-1, args.codebook_size),
-                indices_flat.reshape(-1),
-            )
+            # FP16 forward pass
+            with autocast("cuda"):
+                logits = transformer(indices_flat, text_tokens)  # (B, 16, codebook_size)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, args.codebook_size),
+                    indices_flat.reshape(-1),
+                )
 
-            optimizer.zero_grad()
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(transformer.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss += loss.item()
             n_batches += 1
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+            # Clear intermediate tensors
+            del images, text_tokens, indices, indices_flat, logits, loss
+
+            pbar.set_postfix(loss=f"{total_loss/n_batches:.4f}")
 
         scheduler.step()
         avg_loss = total_loss / n_batches
@@ -171,8 +189,13 @@ def main():
         writer.add_scalar("lr", scheduler.get_last_lr()[0], epoch)
         print(f"Epoch {epoch+1}: loss={avg_loss:.4f}")
 
-        # Generate samples
-        generate_samples(transformer, vqvae, dataset, device, epoch, args.output_dir)
+        # Clear memory
+        clear_memory()
+
+        # Generate samples (less frequently)
+        if (epoch + 1) % args.sample_every == 0:
+            generate_samples(transformer, vqvae, dataset, device, epoch, args.output_dir)
+            clear_memory()
 
         if (epoch + 1) % args.save_every == 0 or epoch == args.epochs - 1:
             save_checkpoint(
