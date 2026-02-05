@@ -134,7 +134,7 @@ def main():
     # Compile for faster training (PyTorch 2.0+)
     if hasattr(torch, 'compile'):
         print("Compiling transformer with torch.compile()...")
-        transformer = torch.compile(transformer)
+        transformer = torch.compile(transformer, mode="reduce-overhead")
 
     optimizer = torch.optim.AdamW(transformer.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
