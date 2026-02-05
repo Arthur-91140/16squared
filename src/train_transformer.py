@@ -107,9 +107,9 @@ def main():
         json.dump(dataset.word2idx, f, indent=2)
     print(f"Vocab saved to {vocab_path}")
 
-    # Load frozen VQ-VAE
+    # Load frozen VQ-VAE (must match train_vqvae.py defaults: hidden_dim=128, embed_dim=256)
     vqvae = VQVAE(
-        in_channels=4, hidden_dim=64, embed_dim=64,
+        in_channels=4, hidden_dim=128, embed_dim=256,
         num_embeddings=args.codebook_size,
     ).to(device)
 

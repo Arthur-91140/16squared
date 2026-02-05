@@ -74,9 +74,9 @@ class TextureGenerator:
             self.word2idx = json.load(f)
         vocab_size = len(self.word2idx)
 
-        # Load VQ-VAE
+        # Load VQ-VAE (must match train_vqvae.py defaults: hidden_dim=128, embed_dim=256)
         self.vqvae = VQVAE(
-            in_channels=4, hidden_dim=64, embed_dim=64,
+            in_channels=4, hidden_dim=128, embed_dim=256,
             num_embeddings=codebook_size,
         ).to(self.device)
         ckpt = torch.load(vqvae_ckpt, map_location=self.device)
