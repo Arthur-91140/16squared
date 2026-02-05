@@ -175,7 +175,15 @@ def main():
             scaler.step(optimizer)
             scaler.update()
 
-            total_loss += loss.item()
+            loss_val = loss.item()
+
+            # NaN/Inf detection
+            if not (loss_val == loss_val) or loss_val > 1e6:
+                print(f"\nNaN/Inf detected at batch! loss={loss_val}")
+                print("Try: lower learning rate (--lr 5e-5)")
+                return
+
+            total_loss += loss_val
             n_batches += 1
 
             # Clear intermediate tensors
