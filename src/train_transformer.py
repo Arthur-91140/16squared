@@ -56,7 +56,7 @@ def generate_samples(transformer, vqvae, dataset, device, epoch, output_dir, n=8
 
     with torch.no_grad():
         indices = transformer.generate(tokens, temperature=0.8, top_k=50)
-        indices_grid = indices.view(-1, 4, 4)
+        indices_grid = indices.view(-1, 16, 16)
         images = vqvae.decode(indices_grid)
 
         images = (images + 1) / 2  # [-1,1] -> [0,1]
@@ -109,7 +109,7 @@ def main():
 
     # Load frozen VQ-VAE
     vqvae = VQVAE(
-        in_channels=4, hidden_dim=128, embed_dim=256,
+        in_channels=4, hidden_dim=64, embed_dim=64,
         num_embeddings=args.codebook_size,
     ).to(device)
 
@@ -123,7 +123,7 @@ def main():
     # Transformer
     transformer = TokenTransformer(
         codebook_size=args.codebook_size,
-        seq_len=16,
+        seq_len=256,  # 16x16
         dim=args.dim,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
@@ -158,7 +158,7 @@ def main():
             # Encode images to VQ indices
             with torch.no_grad():
                 indices = vqvae.encode(images)  # (B, 4, 4)
-            indices_flat = indices.view(indices.shape[0], -1)  # (B, 16)
+            indices_flat = indices.view(indices.shape[0], -1)  # (B, 256)
 
             # FP16 forward pass
             with autocast("cuda"):

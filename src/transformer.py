@@ -2,7 +2,7 @@
 Autoregressive Transformer for generating VQ-VAE token sequences,
 conditioned on text input.
 
-Generates a 4x4 = 16 token sequence representing codebook indices.
+Generates a 16x16 = 256 token sequence representing codebook indices.
 """
 
 import math
@@ -15,7 +15,7 @@ import torch.nn.functional as F
 class TextEncoder(nn.Module):
     """Simple word-embedding based text encoder."""
 
-    def __init__(self, vocab_size: int, embed_dim: int = 512, max_len: int = 16):
+    def __init__(self, vocab_size: int, embed_dim: int = 256, max_len: int = 16):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.pos_embedding = nn.Embedding(max_len, embed_dim)
@@ -77,9 +77,9 @@ class TokenTransformer(nn.Module):
     def __init__(
         self,
         codebook_size: int = 512,
-        seq_len: int = 16,  # 4x4
-        dim: int = 512,
-        num_layers: int = 6,
+        seq_len: int = 256,  # 16x16
+        dim: int = 256,
+        num_layers: int = 8,
         num_heads: int = 8,
         vocab_size: int = 1000,
         text_max_len: int = 16,
@@ -116,11 +116,11 @@ class TokenTransformer(nn.Module):
         Training forward pass.
 
         Args:
-            indices: (B, 16) ground-truth codebook indices
+            indices: (B, 256) ground-truth codebook indices
             text_tokens: (B, L) text token indices
 
         Returns:
-            logits: (B, 16, codebook_size)
+            logits: (B, 256, codebook_size)
         """
         B = indices.shape[0]
         device = indices.device
@@ -130,7 +130,7 @@ class TokenTransformer(nn.Module):
 
         # Prepend BOS
         bos = torch.full((B, 1), self.bos_token, dtype=torch.long, device=device)
-        input_seq = torch.cat([bos, indices], dim=1)[:, :-1]  # (B, 16)
+        input_seq = torch.cat([bos, indices], dim=1)[:, :-1]  # (B, 256)
 
         # Embed tokens + positions
         pos = torch.arange(self.seq_len, device=device).unsqueeze(0)
@@ -144,7 +144,7 @@ class TokenTransformer(nn.Module):
             x = layer(x, text_ctx, causal_mask=mask)
 
         x = self.norm(x)
-        logits = self.head(x)  # (B, 16, codebook_size)
+        logits = self.head(x)  # (B, 256, codebook_size)
         return logits
 
     @torch.no_grad()
@@ -158,7 +158,7 @@ class TokenTransformer(nn.Module):
             top_k: if > 0, only sample from top-k logits
 
         Returns:
-            (B, 16) generated codebook indices
+            (B, 256) generated codebook indices
         """
         B = text_tokens.shape[0]
         device = text_tokens.device
@@ -192,4 +192,4 @@ class TokenTransformer(nn.Module):
             next_token = torch.multinomial(probs, 1)  # (B, 1)
             generated = torch.cat([generated, next_token], dim=1)
 
-        return generated[:, 1:]  # Remove BOS, (B, 16)
+        return generated[:, 1:]  # Remove BOS, (B, 256)

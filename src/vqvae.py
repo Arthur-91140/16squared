@@ -1,10 +1,12 @@
 """
 VQ-VAE for 16x16 RGBA Minecraft textures.
 
-Architecture:
-    Encoder: 16x16x4 -> 4x4x256 (via 2 downsampling blocks)
-    Codebook: 512 entries, dimension 256
-    Decoder: 4x4x256 -> 16x16x4 (via 2 upsampling blocks)
+Architecture (no spatial compression):
+    Encoder: 16x16x4 -> 16x16x64 (feature extraction, no downsampling)
+    Codebook: 512 entries, dimension 64
+    Decoder: 16x16x64 -> 16x16x4 (no upsampling)
+
+This preserves full spatial resolution for pixel-perfect reconstruction.
 """
 
 import torch
@@ -17,10 +19,10 @@ class ResBlock(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(channels, channels, 3, padding=1),
-            nn.GroupNorm(8, channels),
+            nn.GroupNorm(min(8, channels), channels),
             nn.GELU(),
             nn.Conv2d(channels, channels, 3, padding=1),
-            nn.GroupNorm(8, channels),
+            nn.GroupNorm(min(8, channels), channels),
         )
 
     def forward(self, x):
@@ -28,21 +30,19 @@ class ResBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels: int = 4, hidden_dim: int = 128, embed_dim: int = 256):
+    """Encoder without spatial downsampling - preserves 16x16 resolution."""
+
+    def __init__(self, in_channels: int = 4, hidden_dim: int = 64, embed_dim: int = 64):
         super().__init__()
         self.net = nn.Sequential(
-            # 16x16 -> 8x8
-            nn.Conv2d(in_channels, hidden_dim, 4, stride=2, padding=1),
+            # 16x16x4 -> 16x16xhidden
+            nn.Conv2d(in_channels, hidden_dim, 3, padding=1),
             nn.GroupNorm(8, hidden_dim),
             nn.GELU(),
             ResBlock(hidden_dim),
-            # 8x8 -> 4x4
-            nn.Conv2d(hidden_dim, hidden_dim * 2, 4, stride=2, padding=1),
-            nn.GroupNorm(8, hidden_dim * 2),
-            nn.GELU(),
-            ResBlock(hidden_dim * 2),
-            # Project to embedding dim
-            nn.Conv2d(hidden_dim * 2, embed_dim, 1),
+            ResBlock(hidden_dim),
+            # 16x16xhidden -> 16x16xembed
+            nn.Conv2d(hidden_dim, embed_dim, 1),
         )
 
     def forward(self, x):
@@ -50,21 +50,19 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, out_channels: int = 4, hidden_dim: int = 128, embed_dim: int = 256):
+    """Decoder without spatial upsampling - preserves 16x16 resolution."""
+
+    def __init__(self, out_channels: int = 4, hidden_dim: int = 64, embed_dim: int = 64):
         super().__init__()
         self.net = nn.Sequential(
-            # Project from embedding dim
-            nn.Conv2d(embed_dim, hidden_dim * 2, 1),
-            nn.GroupNorm(8, hidden_dim * 2),
-            nn.GELU(),
-            ResBlock(hidden_dim * 2),
-            # 4x4 -> 8x8
-            nn.ConvTranspose2d(hidden_dim * 2, hidden_dim, 4, stride=2, padding=1),
+            # 16x16xembed -> 16x16xhidden
+            nn.Conv2d(embed_dim, hidden_dim, 1),
             nn.GroupNorm(8, hidden_dim),
             nn.GELU(),
             ResBlock(hidden_dim),
-            # 8x8 -> 16x16
-            nn.ConvTranspose2d(hidden_dim, out_channels, 4, stride=2, padding=1),
+            ResBlock(hidden_dim),
+            # 16x16xhidden -> 16x16x4
+            nn.Conv2d(hidden_dim, out_channels, 3, padding=1),
             nn.Tanh(),  # Output in [-1, 1]
         )
 
@@ -75,7 +73,7 @@ class Decoder(nn.Module):
 class VectorQuantizer(nn.Module):
     """Vector Quantization with EMA updates."""
 
-    def __init__(self, num_embeddings: int = 512, embed_dim: int = 256, commitment_cost: float = 0.25, ema_decay: float = 0.99):
+    def __init__(self, num_embeddings: int = 512, embed_dim: int = 64, commitment_cost: float = 0.25, ema_decay: float = 0.99):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embed_dim = embed_dim
@@ -127,7 +125,7 @@ class VectorQuantizer(nn.Module):
                 )
 
         # Loss
-        commitment_loss = F.mse_loss(z, z_q.detach())
+        commitment_loss = self.commitment_cost * F.mse_loss(z, z_q.detach())
         # Straight-through estimator
         z_q_st = z + (z_q - z).detach()
 
@@ -152,8 +150,8 @@ class VQVAE(nn.Module):
     def __init__(
         self,
         in_channels: int = 4,
-        hidden_dim: int = 128,
-        embed_dim: int = 256,
+        hidden_dim: int = 64,
+        embed_dim: int = 64,
         num_embeddings: int = 512,
         commitment_cost: float = 0.25,
     ):

@@ -76,7 +76,7 @@ class TextureGenerator:
 
         # Load VQ-VAE
         self.vqvae = VQVAE(
-            in_channels=4, hidden_dim=128, embed_dim=256,
+            in_channels=4, hidden_dim=64, embed_dim=64,
             num_embeddings=codebook_size,
         ).to(self.device)
         ckpt = torch.load(vqvae_ckpt, map_location=self.device)
@@ -86,7 +86,7 @@ class TextureGenerator:
         # Load Transformer
         self.transformer = TokenTransformer(
             codebook_size=codebook_size,
-            seq_len=16,
+            seq_len=256,  # 16x16
             dim=dim,
             num_layers=num_layers,
             num_heads=num_heads,
@@ -116,7 +116,7 @@ class TextureGenerator:
         """Generate a single 16x16 texture from a text prompt."""
         tokens = self.encode_prompt(prompt)
         indices = self.transformer.generate(tokens, temperature=temperature, top_k=top_k)
-        indices_grid = indices.view(1, 4, 4)
+        indices_grid = indices.view(1, 16, 16)
         image = self.vqvae.decode(indices_grid)
         return postprocess(image[0])
 
@@ -130,7 +130,7 @@ class TextureGenerator:
         """Generate textures for multiple prompts."""
         tokens = torch.cat([self.encode_prompt(p) for p in prompts], dim=0)
         indices = self.transformer.generate(tokens, temperature=temperature, top_k=top_k)
-        indices_grid = indices.view(-1, 4, 4)
+        indices_grid = indices.view(-1, 16, 16)
         images = self.vqvae.decode(indices_grid)
         return [postprocess(images[i]) for i in range(len(prompts))]
 
