@@ -119,7 +119,9 @@ class VectorQuantizer(nn.Module):
                     (self.ema_cluster_size + 1e-5)
                     / (n + self.num_embeddings * 1e-5)
                     * n
-                )
+                ).clamp(min=1e-5)
+                # Clamp ema_embed_sum to prevent inf
+                self.ema_embed_sum.clamp_(-100, 100)
                 self.embedding.weight.data.copy_(
                     self.ema_embed_sum / cluster_size.unsqueeze(1)
                 )
@@ -162,6 +164,7 @@ class VQVAE(nn.Module):
 
     def forward(self, x):
         z = self.encoder(x)
+        z = z.clamp(-10, 10)  # Prevent extreme values causing EMA explosion
         z_q, commit_loss, indices = self.quantizer(z)
         x_recon = self.decoder(z_q)
         recon_loss = F.mse_loss(x_recon, x)
@@ -169,7 +172,7 @@ class VQVAE(nn.Module):
 
     def encode(self, x):
         """Encode images to codebook indices."""
-        z = self.encoder(x)
+        z = self.encoder(x).clamp(-10, 10)
         _, _, indices = self.quantizer(z)
         return indices
 

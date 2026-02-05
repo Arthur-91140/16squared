@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--output_dir", default="outputs")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--embed_dim", type=int, default=256)
     parser.add_argument("--codebook_size", type=int, default=512)
@@ -137,11 +137,26 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
 
-            total_recon += recon_loss.item()
-            total_commit += commit_loss.item()
+            recon_val = recon_loss.item()
+            commit_val = commit_loss.item()
+
+            # NaN/Inf detection
+            if not (recon_val == recon_val) or not (commit_val == commit_val):  # NaN check
+                print(f"\nNaN detected at batch {batch_idx}! Stopping training.")
+                print("Try: lower learning rate (--lr 5e-5) or smaller batch size")
+                return
+            if recon_val > 1e6 or commit_val > 1e6:
+                print(f"\nLoss explosion at batch {batch_idx}! recon={recon_val}, commit={commit_val}")
+                print("Try: lower learning rate (--lr 5e-5) or smaller batch size")
+                return
+
+            total_recon += recon_val
+            total_commit += commit_val
             n_batches += 1
 
             # Clear intermediate tensors
