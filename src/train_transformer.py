@@ -131,10 +131,7 @@ def main():
         text_max_len=16,
     ).to(device)
 
-    # Compile for faster training (PyTorch 2.0+)
-    if hasattr(torch, 'compile'):
-        print("Compiling transformer with torch.compile()...")
-        transformer = torch.compile(transformer, mode="reduce-overhead")
+    # Note: torch.compile() disabled - Flash Attention + KV-cache are the main optimizations
 
     optimizer = torch.optim.AdamW(transformer.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
